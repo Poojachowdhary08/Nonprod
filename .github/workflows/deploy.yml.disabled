@@ -1,0 +1,224 @@
+name: Build and Deploy to EC2 with YML File
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      START_TIME: ${{ github.event.head_commit.timestamp }}
+
+    steps:
+      # 1️⃣ Capture actual job start time in epoch seconds (used for duration calc)
+      - name: Capture Epoch Start Time
+        id: start
+        run: echo "EPOCH_START=$(date +%s)" >> $GITHUB_ENV
+
+      # 2️⃣ Checkout code from GitHub
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 3️⃣ Log in to Docker Hub
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      # 4️⃣ Build Docker image (Backend)
+      - name: Build Backend Image
+        run: docker build -t jaswanthdogga01/my-fastapi-app:v16 -f Dockerfile.backend .
+
+      # 5️⃣ Push Docker image (Backend)
+      - name: Push Backend Image
+        run: docker push jaswanthdogga01/my-fastapi-app:v16
+
+      # 4.1️⃣ Build Greetings Worker Image
+      - name: Build Greetings Worker Image
+        run: docker build -t jaswanthdogga01/greet-worker:v1 -f Dockerfile.greet_worker .
+
+      # 5.1️⃣ Push Greetings Worker Image
+      - name: Push Greetings Worker Image
+        run: docker push jaswanthdogga01/greet-worker:v1
+
+      # 4.2️⃣ Build Notification Worker Image
+      - name: Build Notification Worker Image
+        run: docker build -t jaswanthdogga01/notification-worker:v1 -f Dockerfile.notification_worker .
+
+      # 5.2️⃣ Push Notification Worker Image
+      - name: Push Notification Worker Image
+        run: docker push jaswanthdogga01/notification-worker:v1
+
+      # 6️⃣ Generate Metadata (IST-safe, commit, actor, run URL)
+      - name: Generate Metadata
+        run: |
+          TIMESTAMP=$(TZ=Asia/Kolkata date +"%Y%m%d_%H%M")
+          echo "IST_TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=backend_container_${TIMESTAMP}" >> $GITHUB_ENV
+          echo "GREET_CONTAINER_NAME=greetings_worker_${TIMESTAMP}" >> $GITHUB_ENV
+          echo "NOTIF_CONTAINER_NAME=notification_worker_${TIMESTAMP}" >> $GITHUB_ENV
+          echo "COMMIT_MSG=$(git log -1 --pretty=format:'%s')" >> $GITHUB_ENV
+          echo "IMAGE_NAME=jaswanthdogga01/my-fastapi-app:v16" >> $GITHUB_ENV
+          echo "GREET_IMAGE=jaswanthdogga01/greet-worker:v1" >> $GITHUB_ENV
+          echo "NOTIF_IMAGE=jaswanthdogga01/notification-worker:v1" >> $GITHUB_ENV
+          echo "ACTOR=${GITHUB_ACTOR}" >> $GITHUB_ENV
+          echo "RUN_URL=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> $GITHUB_ENV
+
+      # 7️⃣ SSH → EC2: STOP all 3 if running, REMOVE old containers with the same names,
+      #    pull latest images, and START fresh ones.
+      - name: SSH into EC2 and Deploy
+        # pin a version instead of master for stability
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: CONTAINER_NAME,GREET_CONTAINER_NAME,NOTIF_CONTAINER_NAME,IMAGE_NAME,GREET_IMAGE,NOTIF_IMAGE
+          script: |
+            set -euo pipefail
+
+            BACKEND_IMAGE="${IMAGE_NAME:-jaswanthdogga01/my-fastapi-app:v16}"
+            GREET_IMAGE="${GREET_IMAGE:-jaswanthdogga01/greet-worker:v1}"
+            NOTIF_IMAGE="${NOTIF_IMAGE:-jaswanthdogga01/notification-worker:v1}"
+
+            echo "[Pull] images"
+            docker pull "$BACKEND_IMAGE"
+            docker pull "$GREET_IMAGE"
+            docker pull "$NOTIF_IMAGE"
+
+            # --- Hard stop and remove ALL older running containers of these roles ---
+            echo "[Stop] any running backend/greet/notif containers"
+            docker ps -q --filter "name=backend_container_" | xargs -r docker stop
+            docker ps -q --filter "name=greetings_worker_" | xargs -r docker stop
+            docker ps -q --filter "name=notification_worker_" | xargs -r docker stop
+
+            echo "[Remove] any containers (stopped/running) that would clash with new names"
+            docker ps -aq --filter "name=$CONTAINER_NAME" | xargs -r docker rm -f
+            docker ps -aq --filter "name=$GREET_CONTAINER_NAME" | xargs -r docker rm -f
+            docker ps -aq --filter "name=$NOTIF_CONTAINER_NAME" | xargs -r docker rm -f
+
+            # Optional: also prune exited ones older than 14 days for all three families
+            echo "[Cleanup] prune exited containers older than 14 days for these families"
+            NOW_EPOCH=$(date +%s)
+            for ID in $(docker container ls -a --filter "status=exited" --format "{{.ID}}"); do
+              CREATED=$(docker inspect -f '{{.Created}}' "$ID" 2>/dev/null || true)
+              [ -z "$CREATED" ] && continue
+              CREATED_EPOCH=$(date -d "$CREATED" +%s 2>/dev/null || echo 0)
+              AGE_DAYS=$(( (NOW_EPOCH - CREATED_EPOCH) / 86400 ))
+              NAME=$(docker inspect -f '{{.Name}}' "$ID" | sed 's#^/##')
+              case "$NAME" in
+                backend_container_*|greetings_worker_*|notification_worker_*)
+                  if [ "$AGE_DAYS" -gt 14 ]; then
+                    echo "Removing old container $NAME ($ID) - ${AGE_DAYS}d"
+                    docker rm "$ID" >/dev/null 2>&1 || true
+                  fi
+                ;;
+              esac
+            done
+
+            echo "[Run] backend"
+            docker run -d --restart unless-stopped \
+              -p 8080:8080 \
+              --name "$CONTAINER_NAME" \
+              -v /home/ec2-user/certs:/app/backend/certs \
+              "$BACKEND_IMAGE"
+
+            echo "[Run] greetings worker"
+            docker run -d --restart unless-stopped \
+              --name "$GREET_CONTAINER_NAME" \
+              "$GREET_IMAGE"
+
+            echo "[Run] notification worker"
+            docker run -d --restart unless-stopped \
+              --name "$NOTIF_CONTAINER_NAME" \
+              "$NOTIF_IMAGE"
+
+            echo "[Verify] show running containers"
+            docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+
+
+      # ✅ 8. Slack Notification - SUCCESS
+      - name: ✅ Slack Notification - SUCCESS
+        if: success()
+        shell: bash
+        run: |
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - EPOCH_START))
+          DURATION_HUMAN="$(($DURATION / 60)) min $(($DURATION % 60)) sec"
+
+          NOW_IST=$(TZ=Asia/Kolkata date "+%A %d %B %Y %I:%M:%S %p IST")
+          NOW_UTC=$(TZ=UTC date "+%A %d %B %Y %I:%M:%S %p UTC")
+
+          MESSAGE=$(cat <<EOF
+          :white_check_mark: *GitHub CI Deploy Successful!*
+          :clock3: $NOW_IST  ($NOW_UTC)
+          :hourglass_flowing_sand: *Duration:* $DURATION_HUMAN
+          :package: *Backend Image:* $IMAGE_NAME
+          :open_file_folder: *Backend Container:* $CONTAINER_NAME
+          :package: *Greet Worker Image:* $GREET_IMAGE
+          :open_file_folder: *Greet Worker Container:* $GREET_CONTAINER_NAME
+          :package: *Notif Worker Image:* $NOTIF_IMAGE
+          :open_file_folder: *Notif Worker Container:* $NOTIF_CONTAINER_NAME
+          :memo: *Commit:* $COMMIT_MSG
+          :technologist: *By:* $ACTOR
+          🔗 *Run:* $RUN_URL
+          EOF
+                    )
+          PAYLOAD=$(jq -n --arg text "$MESSAGE" '{text: $text}')
+          curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          GREET_IMAGE: ${{ env.GREET_IMAGE }}
+          NOTIF_IMAGE: ${{ env.NOTIF_IMAGE }}
+          GREET_CONTAINER_NAME: ${{ env.GREET_CONTAINER_NAME }}
+          NOTIF_CONTAINER_NAME: ${{ env.NOTIF_CONTAINER_NAME }}
+          COMMIT_MSG: ${{ env.COMMIT_MSG }}
+          ACTOR: ${{ env.ACTOR }}
+          RUN_URL: ${{ env.RUN_URL }}
+          EPOCH_START: ${{ env.EPOCH_START }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+
+      # ❌ 9. Slack Notification - FAILURE
+      - name: ❌ Slack Notification - FAILURE
+        if: failure()
+        shell: bash
+        run: |
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - EPOCH_START))
+          DURATION_HUMAN="$(($DURATION / 60)) min $(($DURATION % 60)) sec"
+
+          NOW_IST=$(TZ=Asia/Kolkata date "+%A %d %B %Y %I:%M:%S %p IST")
+          NOW_UTC=$(TZ=UTC date "+%A %d %B %Y %I:%M:%S %p UTC")
+
+          MESSAGE=$(cat <<EOF
+            :x: *GitHub CI Deploy Failed!*
+            :clock3: $NOW_IST  ($NOW_UTC)
+            :hourglass_flowing_sand: *Duration:* $DURATION_HUMAN
+            :package: *Backend Image:* $IMAGE_NAME
+            :open_file_folder: *Backend Container:* $CONTAINER_NAME
+            :package: *Greet Worker Image:* $GREET_IMAGE
+            :open_file_folder: *Greet Worker Container:* $GREET_CONTAINER_NAME
+            :package: *Notif Worker Image:* $NOTIF_IMAGE
+            :open_file_folder: *Notif Worker Container:* $NOTIF_CONTAINER_NAME
+            :memo: *Commit:* $COMMIT_MSG
+            :technologist: *By:* $ACTOR
+            :warning: *Check GitHub Actions for error logs.*
+            🔗 *Run:* $RUN_URL
+            EOF
+                )
+          PAYLOAD=$(jq -n --arg text "$MESSAGE" '{text: $text}')
+          curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          GREET_IMAGE: ${{ env.GREET_IMAGE }}
+          NOTIF_IMAGE: ${{ env.NOTIF_IMAGE }}
+          GREET_CONTAINER_NAME: ${{ env.GREET_CONTAINER_NAME }}
+          NOTIF_CONTAINER_NAME: ${{ env.NOTIF_CONTAINER_NAME }}
+          COMMIT_MSG: ${{ env.COMMIT_MSG }}
+          ACTOR: ${{ env.ACTOR }}
+          RUN_URL: ${{ env.RUN_URL }}
+          EPOCH_START: ${{ env.EPOCH_START }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}

@@ -1,0 +1,25 @@
+{
+    "rewrites": [
+      {
+        "source": "/sw.js",
+        "destination": "/sw.js"
+      },
+      {
+        "source": "/manifest.webmanifest",
+        "destination": "/manifest.webmanifest"
+      },
+      {
+        "source": "/icons/(.*)",
+        "destination": "/icons/$1"
+      },
+      {
+        "source": "/apple-touch-icon.png",
+        "destination": "/icons/apple-touch-icon.png"
+      },
+      {
+        "source": "/(.*)",
+        "destination": "/index.html"
+      }
+    ]
+  }
+  

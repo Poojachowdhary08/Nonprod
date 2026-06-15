@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "174837185333",
+    "project_id": "datso-notifications",
+    "storage_bucket": "datso-notifications.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:174837185333:android:480a34f6aed69028bbaa7c",
+        "android_client_info": {
+          "package_name": "com.datso.AvenueConnect"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAUg082XRy41oJnyEaK_8AflZG8qW-71Us"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

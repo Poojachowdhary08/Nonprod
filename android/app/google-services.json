@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "126785476414",
+    "project_id": "avenueconnect-dev",
+    "storage_bucket": "avenueconnect-dev.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:126785476414:android:3d4b108655ace2d96b7e6f",
+        "android_client_info": {
+          "package_name": "com.datso.AvenueConnect.dev"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAujb8cZT7RCichkNbfairTknXEDf8dEsc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
